@@ -310,25 +310,25 @@ Instructions:
         fi
         
         local comment_body="## Pi Agent Review
-        
+
 $summary
 
 (Automated review by Pi Swarm)"
 
         if [[ "$changes_made" == true ]]; then
              comment_body="## Pi Agent Review & Fixes
-             
+
 I have reviewed this PR and applied fixes.
 
 $summary
 
 (Automated review by Pi Swarm)"
         fi
-        
+
         # If no changes made, and we want to comment "All good"
         if [[ "$changes_made" == false ]]; then
              comment_body="## Pi Agent Review
-             
+
 I have reviewed this PR.
 
 $summary
