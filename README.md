@@ -19,7 +19,11 @@ Parallel GitHub issue and PR processing using the `pi` agent and Git worktrees.
    - `pi` agent installed
    - `git`
 
-2. Clone this repository or add it to your agent's skills.
+2. Install as a skill for the `pi` agent:
+   ```bash
+   mkdir -p ~/.config/agents/skills
+   git clone https://github.com/lsj5031/pi-swarm.git ~/.config/agents/skills/pi-swarm
+   ```
 
 ## Usage
 
