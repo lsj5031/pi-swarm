@@ -19,10 +19,15 @@ Parallel GitHub issue and PR processing using the `pi` agent and Git worktrees.
    - `pi` agent installed
    - `git`
 
-2. Install as a skill for the `pi` agent:
+2. Clone the repository:
+   ```bash
+   git clone https://github.com/lsj5031/pi-swarm.git
+   ```
+
+   *Optional: Install as a skill for the `pi` agent to have its documentation available during agent sessions:*
    ```bash
    mkdir -p ~/.config/agents/skills
-   git clone https://github.com/lsj5031/pi-swarm.git ~/.config/agents/skills/pi-swarm
+   ln -s $(pwd)/pi-swarm ~/.config/agents/skills/pi-swarm
    ```
 
 ## Usage
@@ -34,14 +39,14 @@ Parallel GitHub issue and PR processing using the `pi` agent and Git worktrees.
 
 Process specific issues by number:
 ```bash
-~/.config/agents/skills/pi-swarm/scripts/swarm.sh 12 15 22
+/path/to/pi-swarm/scripts/swarm.sh 12 15 22
 ```
 
 ### Reviewing PRs
 
 Review and fix specific PRs:
 ```bash
-~/.config/agents/skills/pi-swarm/scripts/pr-swarm.sh 101 105
+/path/to/pi-swarm/scripts/pr-swarm.sh 101 105
 ```
 
 ## Options
