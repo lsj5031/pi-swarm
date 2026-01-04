@@ -23,18 +23,21 @@ Parallel GitHub issue and PR processing using the `pi` agent and Git worktrees.
 
 ## Usage
 
+> [!IMPORTANT]
+> Always run these scripts from the root of the repository you want to process issues or PRs for.
+
 ### Working on Issues
 
 Process specific issues by number:
 ```bash
-./scripts/swarm.sh 12 15 22
+~/.config/agents/skills/pi-swarm/scripts/swarm.sh 12 15 22
 ```
 
 ### Reviewing PRs
 
 Review and fix specific PRs:
 ```bash
-./scripts/pr-swarm.sh 101 105
+~/.config/agents/skills/pi-swarm/scripts/pr-swarm.sh 101 105
 ```
 
 ## Options
