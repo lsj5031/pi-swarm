@@ -72,10 +72,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --max-retries)
+            validate_int "$2" "--max-retries" || exit 1
             MAX_RETRIES="$2"
             shift 2
             ;;
         --wave-timeout)
+            validate_int "$2" "--wave-timeout" || exit 1
             WAVE_TIMEOUT="$2"
             shift 2
             ;;
@@ -92,6 +94,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -j|--jobs)
+            validate_int "$2" "--jobs" || exit 1
             JOBS="$2"
             shift 2
             ;;
@@ -111,20 +114,7 @@ if [[ -z "$EPIC_NUM" ]]; then
 fi
 
 # Check dependencies
-check_dependencies() {
-    local missing=()
-    command -v gh >/dev/null 2>&1 || missing+=("gh")
-    command -v jq >/dev/null 2>&1 || missing+=("jq")
-    command -v pi >/dev/null 2>&1 || missing+=("pi")
-    command -v git >/dev/null 2>&1 || missing+=("git")
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        error "Missing dependencies: ${missing[*]}"
-        exit 1
-    fi
-}
-
-check_dependencies
+require_deps gh jq pi git || exit 1
 
 # Initialize state directory
 mkdir -p "$STATE_DIR"
@@ -638,6 +628,12 @@ main() {
         log "Using existing execution plan"
     else
         parse_epic_with_pi || exit 1
+    fi
+    
+    # Validate plan structure before proceeding
+    if ! validate_plan "$PLAN_FILE" "waves"; then
+        error "Invalid execution plan. Please check the plan file or re-generate."
+        exit 1
     fi
     
     show_plan

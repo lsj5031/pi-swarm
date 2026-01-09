@@ -4,6 +4,9 @@ set -euo pipefail
 # Pi Swarm - Parallel GitHub issue processing with pi agent
 # Usage: swarm.sh [options] <issue-numbers...>
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
 WORKTREE_DIR=".worktrees"
 MODEL=""
 PUSH=true
@@ -13,30 +16,6 @@ MAX_JOBS=0  # 0 = unlimited
 TIMEOUT=0   # 0 = no timeout (in minutes)
 DRY_RUN=false
 ISSUES=()
-
-# Colors for parallel logs (exported as string for subprocess compatibility)
-COLOR_BLUE='\033[0;34m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_MAGENTA='\033[0;35m'
-COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
-NC='\033[0m'
-
-# Check dependencies
-check_dependencies() {
-    local missing=()
-    command -v gh >/dev/null 2>&1 || missing+=("gh")
-    command -v jq >/dev/null 2>&1 || missing+=("jq")
-    command -v pi >/dev/null 2>&1 || missing+=("pi")
-    command -v git >/dev/null 2>&1 || missing+=("git")
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "Error: Missing required dependencies: ${missing[*]}"
-        echo "Please install them before running this script."
-        exit 1
-    fi
-}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -71,10 +50,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -j|--jobs)
+            validate_int "$2" "--jobs" || exit 1
             MAX_JOBS="$2"
             shift 2
             ;;
         --timeout)
+            validate_int "$2" "--timeout" || exit 1
             TIMEOUT="$2"
             shift 2
             ;;
@@ -113,7 +94,7 @@ if [[ ${#ISSUES[@]} -eq 0 ]]; then
 fi
 
 # Check dependencies before proceeding
-check_dependencies
+require_deps gh jq pi git || exit 1
 
 # Ensure worktree directory exists
 mkdir -p "$WORKTREE_DIR"
@@ -135,13 +116,6 @@ echo "🌿 Default branch: $DEFAULT_BRANCH"
 [[ $TIMEOUT -gt 0 ]] && echo "⏱️  Timeout: ${TIMEOUT}m per issue"
 [[ "$DRY_RUN" == true ]] && echo "🔍 DRY RUN MODE - no changes will be made"
 echo ""
-
-# Get color by index
-get_color() {
-    local idx=$1
-    local colors=("$COLOR_BLUE" "$COLOR_GREEN" "$COLOR_YELLOW" "$COLOR_MAGENTA" "$COLOR_CYAN" "$COLOR_RED")
-    echo "${colors[$((idx % ${#colors[@]}))]}"
-}
 
 # Function to process a single issue
 process_issue() {
@@ -221,12 +195,6 @@ Instructions:
 
     echo -e "$tag Running pi agent..." | tee -a "$log_file"
 
-    # Build pi command
-    local pi_cmd="pi -p"
-    if [[ -n "$MODEL" ]]; then
-        pi_cmd="pi --model $MODEL -p"
-    fi
-
     # Run pi agent in the worktree (with optional timeout)
     local abs_log_file
     abs_log_file="$(pwd)/$log_file"
@@ -236,50 +204,6 @@ Instructions:
     if [[ $TIMEOUT -gt 0 ]]; then
         timeout_cmd="timeout ${TIMEOUT}m"
     fi
-
-    # Helper function to parse and display pi output
-    parse_pi_output() {
-        local tag="$1"
-        local log_file="$2"
-        local json_log_file="$3"
-        
-        while IFS= read -r line; do
-            # Log raw JSON to jsonl file
-            echo "$line" >> "$json_log_file"
-
-            # Parse JSON with jq
-            if [[ "$line" =~ ^\{.*\}$ ]]; then
-                local type
-                type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
-                
-                case "$type" in
-                    tool_execution_start)
-                        local tool args
-                        tool=$(echo "$line" | jq -r '.toolName // "unknown"' 2>/dev/null)
-                        args=$(echo "$line" | jq -r '.args // {} | tostring' 2>/dev/null)
-                        # Truncate args if too long
-                        if [[ ${#args} -gt 100 ]]; then args="${args:0:97}..."; fi
-                        echo -e "$tag 🔧 Tool: $tool $args" | tee -a "$log_file"
-                        ;;
-                    message_start)
-                        local role
-                        role=$(echo "$line" | jq -r '.message.role // empty' 2>/dev/null)
-                        if [[ "$role" == "assistant" ]]; then
-                            echo -e "$tag 🤖 Agent is thinking/writing..." | tee -a "$log_file"
-                        fi
-                        ;;
-                    error|hook_error)
-                        local msg
-                        msg=$(echo "$line" | jq -r '.error // .message // "Unknown error"' 2>/dev/null)
-                        echo -e "$tag ❌ Error: $msg" | tee -a "$log_file"
-                        ;;
-                esac
-            else
-                # Non-JSON line (likely system error or timeout)
-                echo -e "$tag $line" | tee -a "$log_file"
-            fi
-        done
-    }
 
     # Use --mode json for better visibility
     local pi_json_cmd="pi --mode json"
@@ -301,7 +225,13 @@ Instructions:
         # Push if requested
         if [[ "$PUSH" == true ]]; then
             echo -e "$tag Pushing branch..." | tee -a "$log_file"
-            (cd "$worktree_path" && git push -u origin "$branch_name" 2>&1) | tee -a "$log_file"
+            local push_output
+            if push_output=$(cd "$worktree_path" && git push -u origin "$branch_name" 2>&1); then
+                echo "$push_output" | tee -a "$log_file"
+            else
+                echo "$push_output" | tee -a "$log_file"
+                echo -e "$tag ⚠️ Push failed, continuing..." | tee -a "$log_file"
+            fi
         fi
 
         # Create PR if requested
@@ -366,13 +296,12 @@ See commits for details."
 }
 
 # Export function and variables for parallel execution
-export -f process_issue get_color
+export -f process_issue get_color parse_pi_output
 export WORKTREE_DIR MODEL PUSH CREATE_PR CLEANUP DEFAULT_BRANCH DRY_RUN TIMEOUT
 export COLOR_BLUE COLOR_GREEN COLOR_YELLOW COLOR_MAGENTA COLOR_CYAN COLOR_RED NC
 
-# Track PIDs and process group for parallel execution
+# Track PIDs for parallel execution
 declare -A PIDS
-SWARM_PGID=$$
 
 # Trap to handle interruption - kill only our process group
 cleanup_swarm() {

@@ -93,14 +93,17 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --max-parallel)
+            validate_int "$2" "--max-parallel" || exit 1
             MAX_PARALLEL_EPICS="$2"
             shift 2
             ;;
         --max-retries)
+            validate_int "$2" "--max-retries" || exit 1
             MAX_RETRIES="$2"
             shift 2
             ;;
         --epic-timeout)
+            validate_int "$2" "--epic-timeout" || exit 1
             EPIC_TIMEOUT="$2"
             shift 2
             ;;
@@ -117,6 +120,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -j|--jobs)
+            validate_int "$2" "--jobs" || exit 1
             JOBS="$2"
             shift 2
             ;;
@@ -137,20 +141,7 @@ if [[ -z "$MILESTONE_NUM" ]] && [[ ${#EPICS[@]} -eq 0 ]] && [[ -z "$PROJECT_SPEC
 fi
 
 # Check dependencies
-check_dependencies() {
-    local missing=()
-    command -v gh >/dev/null 2>&1 || missing+=("gh")
-    command -v jq >/dev/null 2>&1 || missing+=("jq")
-    command -v pi >/dev/null 2>&1 || missing+=("pi")
-    command -v git >/dev/null 2>&1 || missing+=("git")
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        error "Missing dependencies: ${missing[*]}"
-        exit 1
-    fi
-}
-
-check_dependencies
+require_deps gh jq pi git || exit 1
 
 # Initialize state directory
 mkdir -p "$STATE_DIR"
@@ -795,6 +786,12 @@ main() {
             generate_project_plan || exit 1
             show_plan
             
+            if [[ "$DRY_RUN" == true ]]; then
+                log "🔍 DRY RUN: Would create GitHub issues (skipped)"
+                log "🔍 DRY RUN complete. No changes made."
+                exit 0
+            fi
+            
             echo ""
             log "Creating GitHub issues..."
             create_github_issues
@@ -822,10 +819,16 @@ main() {
         fi
     fi
     
+    # Validate plan structure before proceeding
+    if ! validate_plan "$PLAN_FILE" "epic_waves"; then
+        error "Invalid execution plan. Please check the plan file or re-generate."
+        exit 1
+    fi
+    
     show_plan
     init_state
     
-    if [[ "$DRY_RUN" == true ]] && [[ -z "$PROJECT_SPEC" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
         log "🔍 DRY RUN complete. No changes made."
         exit 0
     fi

@@ -4,6 +4,9 @@ set -euo pipefail
 # Pi PR Swarm - Parallel GitHub PR review and fix with pi agent
 # Usage: pr-swarm.sh [options] <pr-numbers...>
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
 WORKTREE_DIR=".worktrees"
 MODEL=""
 PUSH=true
@@ -12,30 +15,6 @@ MAX_JOBS=0  # 0 = unlimited
 TIMEOUT=0   # 0 = no timeout (in minutes)
 DRY_RUN=false
 PRS=()
-
-# Colors for parallel logs
-COLOR_BLUE='\033[0;34m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_MAGENTA='\033[0;35m'
-COLOR_CYAN='\033[0;36m'
-COLOR_RED='\033[0;31m'
-NC='\033[0m'
-
-# Check dependencies
-check_dependencies() {
-    local missing=()
-    command -v gh >/dev/null 2>&1 || missing+=("gh")
-    command -v jq >/dev/null 2>&1 || missing+=("jq")
-    command -v pi >/dev/null 2>&1 || missing+=("pi")
-    command -v git >/dev/null 2>&1 || missing+=("git")
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "Error: Missing required dependencies: ${missing[*]}"
-        echo "Please install them before running this script."
-        exit 1
-    fi
-}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -61,10 +40,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -j|--jobs)
+            validate_int "$2" "--jobs" || exit 1
             MAX_JOBS="$2"
             shift 2
             ;;
         --timeout)
+            validate_int "$2" "--timeout" || exit 1
             TIMEOUT="$2"
             shift 2
             ;;
@@ -100,7 +81,7 @@ if [[ ${#PRS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-check_dependencies
+require_deps gh jq pi git || exit 1
 
 mkdir -p "$WORKTREE_DIR"
 
@@ -117,47 +98,6 @@ echo "📋 PRs: ${PRS[*]}"
 [[ $TIMEOUT -gt 0 ]] && echo "⏱️  Timeout: ${TIMEOUT}m per PR"
 [[ "$DRY_RUN" == true ]] && echo "🔍 DRY RUN MODE"
 echo ""
-
-get_color() {
-    local idx=$1
-    local colors=("$COLOR_BLUE" "$COLOR_GREEN" "$COLOR_YELLOW" "$COLOR_MAGENTA" "$COLOR_CYAN" "$COLOR_RED")
-    echo "${colors[$((idx % ${#colors[@]}))]}"
-}
-
-# Helper function to parse and display pi output
-parse_pi_output() {
-    local tag="$1"
-    local log_file="$2"
-    local json_log_file="$3"
-    while IFS= read -r line; do
-        echo "$line" >> "$json_log_file"
-        if [[ "$line" =~ ^\{.*\}$ ]]; then
-            local type
-            type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
-            case "$type" in
-                tool_execution_start)
-                    local tool args
-                    tool=$(echo "$line" | jq -r '.toolName // "unknown"' 2>/dev/null)
-                    args=$(echo "$line" | jq -r '.args // {} | tostring' 2>/dev/null)
-                    [[ ${#args} -gt 100 ]] && args="${args:0:97}..."
-                    echo -e "$tag 🔧 Tool: $tool $args" | tee -a "$log_file"
-                    ;;
-                message_start)
-                    local role
-                    role=$(echo "$line" | jq -r '.message.role // empty' 2>/dev/null)
-                    [[ "$role" == "assistant" ]] && echo -e "$tag 🤖 Agent is working..." | tee -a "$log_file"
-                    ;;
-                error|hook_error)
-                    local msg
-                    msg=$(echo "$line" | jq -r '.error // .message // "Unknown error"' 2>/dev/null)
-                    echo -e "$tag ❌ Error: $msg" | tee -a "$log_file"
-                    ;;
-            esac
-        else
-            echo -e "$tag $line" | tee -a "$log_file"
-        fi
-    done
-}
 
 process_pr() {
     local pr_num=$1
@@ -262,20 +202,26 @@ Instructions:
         local changes_made=false
         
         if [[ "$PUSH" == true ]]; then
-            echo -e "$tag Pushing changes..." | tee -a "$log_file"
-            # Push to the head repo and ref
-            # We use the URL and Ref we got from JSON
-            if push_output=$(cd "$worktree_path" && git push "$head_repo_url" "$branch_name:$head_ref" 2>&1); then
-                echo "$push_output" | tee -a "$log_file"
-                if [[ "$push_output" == *"Everything up-to-date"* ]]; then
-                    changes_made=false
-                else
-                    changes_made=true
-                fi
+            # Check if we have permission to push (maintainerCanModify)
+            if [[ "$can_modify" == "false" ]]; then
+                echo -e "$tag ⚠️  Cannot push: maintainerCanModify is disabled for this fork" | tee -a "$log_file"
+                echo -e "$tag    Review changes are in $worktree_path but cannot be pushed" | tee -a "$log_file"
             else
-                echo -e "$tag ❌ Push failed" | tee -a "$log_file"
-                echo "$push_output" >> "$log_file"
-                # If push fails, we still might want to comment?
+                echo -e "$tag Pushing changes..." | tee -a "$log_file"
+                # Push to the head repo and ref
+                # We use the URL and Ref we got from JSON
+                if push_output=$(cd "$worktree_path" && git push "$head_repo_url" "$branch_name:$head_ref" 2>&1); then
+                    echo "$push_output" | tee -a "$log_file"
+                    if [[ "$push_output" == *"Everything up-to-date"* ]]; then
+                        changes_made=false
+                    else
+                        changes_made=true
+                    fi
+                else
+                    echo -e "$tag ❌ Push failed" | tee -a "$log_file"
+                    echo "$push_output" >> "$log_file"
+                    changes_made=false
+                fi
             fi
         fi
 
@@ -366,7 +312,6 @@ export WORKTREE_DIR MODEL PUSH CLEANUP DRY_RUN TIMEOUT
 export COLOR_BLUE COLOR_GREEN COLOR_YELLOW COLOR_MAGENTA COLOR_CYAN COLOR_RED NC
 
 declare -A PIDS
-SWARM_PGID=$$
 
 cleanup_swarm() {
     echo ""
@@ -423,7 +368,32 @@ done
 
 echo ""
 echo "⏳ Waiting for completion..."
-wait
-
+echo "   Monitor with: tail -f $WORKTREE_DIR/pr-*.log"
 echo ""
-echo "Done."
+
+# Wait for all and collect results
+FAILED=()
+SUCCEEDED=()
+
+for pr in "${PRS[@]}"; do
+    if [[ -n "${PIDS[$pr]:-}" ]]; then
+        if wait "${PIDS[$pr]}"; then
+            SUCCEEDED+=("$pr")
+        else
+            FAILED+=("$pr")
+        fi
+    fi
+done
+
+# Summary
+echo ""
+echo "═══════════════════════════════════════"
+echo "🐝 Pi PR Swarm Complete"
+echo "═══════════════════════════════════════"
+echo "✅ Succeeded: ${SUCCEEDED[*]:-none}"
+echo "❌ Failed: ${FAILED[*]:-none}"
+echo ""
+echo "Logs: $WORKTREE_DIR/pr-*.log"
+
+# Exit with error if any failed
+[[ ${#FAILED[@]} -eq 0 ]]

@@ -8,6 +8,157 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/state.sh"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Colors (for consistent output across scripts)
+# ═══════════════════════════════════════════════════════════════════════════
+
+COLOR_BLUE='\033[0;34m'
+COLOR_GREEN='\033[0;32m'
+COLOR_YELLOW='\033[0;33m'
+COLOR_MAGENTA='\033[0;35m'
+COLOR_CYAN='\033[0;36m'
+COLOR_RED='\033[0;31m'
+NC='\033[0m'
+
+# Get color by index (for parallel log coloring)
+get_color() {
+    local idx=$1
+    local colors=("$COLOR_BLUE" "$COLOR_GREEN" "$COLOR_YELLOW" "$COLOR_MAGENTA" "$COLOR_CYAN" "$COLOR_RED")
+    echo "${colors[$((idx % ${#colors[@]}))]}"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dependency Checking
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Check for required dependencies
+# Usage: require_deps gh jq pi git
+require_deps() {
+    local missing=()
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: Missing required dependencies: ${missing[*]}" >&2
+        echo "Please install them before running this script." >&2
+        return 1
+    fi
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Input Validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Validate that a value is a non-negative integer
+# Usage: validate_int "value" "option_name"
+validate_int() {
+    local value="$1"
+    local name="$2"
+    
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "Error: $name must be a non-negative integer, got: '$value'" >&2
+        return 1
+    fi
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JSON Output Parsing (for pi agent streaming output)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Parse and display pi agent JSON output
+# Usage: some_command | parse_pi_output "$tag" "$log_file" "$json_log_file"
+parse_pi_output() {
+    local tag="$1"
+    local log_file="$2"
+    local json_log_file="$3"
+    
+    while IFS= read -r line; do
+        # Use jq to validate JSON instead of regex
+        local type
+        if type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null) && [[ -n "$type" ]]; then
+            # Only log valid JSON to jsonl file
+            echo "$line" >> "$json_log_file"
+            case "$type" in
+                tool_execution_start)
+                    local tool args
+                    tool=$(echo "$line" | jq -r '.toolName // "unknown"' 2>/dev/null)
+                    args=$(echo "$line" | jq -r '.args // {} | tostring' 2>/dev/null)
+                    # Truncate args if too long
+                    if [[ ${#args} -gt 100 ]]; then args="${args:0:97}..."; fi
+                    echo -e "$tag 🔧 Tool: $tool $args" | tee -a "$log_file"
+                    ;;
+                message_start)
+                    local role
+                    role=$(echo "$line" | jq -r '.message.role // empty' 2>/dev/null)
+                    if [[ "$role" == "assistant" ]]; then
+                        echo -e "$tag 🤖 Agent is working..." | tee -a "$log_file"
+                    fi
+                    ;;
+                error|hook_error)
+                    local msg
+                    msg=$(echo "$line" | jq -r '.error // .message // "Unknown error"' 2>/dev/null)
+                    echo -e "$tag ❌ Error: $msg" | tee -a "$log_file"
+                    ;;
+            esac
+        else
+            # Non-JSON line (likely system error or timeout)
+            echo -e "$tag $line" | tee -a "$log_file"
+        fi
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Plan Validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Validate that a plan file has the required structure
+# Usage: validate_plan "$plan_file" "waves" "issues"
+# Returns: 0 if valid, 1 if invalid
+# Note: For array fields, validates they exist and are non-empty arrays
+validate_plan() {
+    local plan_file="$1"
+    shift
+    local required_fields=("$@")
+    
+    if [[ ! -f "$plan_file" ]]; then
+        echo "Error: Plan file not found: $plan_file" >&2
+        return 1
+    fi
+    
+    if ! jq empty "$plan_file" 2>/dev/null; then
+        echo "Error: Plan file is not valid JSON: $plan_file" >&2
+        return 1
+    fi
+    
+    local missing=()
+    for field in "${required_fields[@]}"; do
+        local check_result
+        # Check if field exists, is an array, and is non-empty; or exists and is non-null for other types
+        check_result=$(jq -r "
+            if .$field == null then \"missing\"
+            elif (.$field | type) == \"array\" then
+                if (.$field | length) > 0 then \"ok\" else \"empty_array\" end
+            else \"ok\" end
+        " "$plan_file" 2>/dev/null)
+        
+        if [[ "$check_result" == "missing" ]]; then
+            missing+=("$field")
+        elif [[ "$check_result" == "empty_array" ]]; then
+            missing+=("$field (empty array)")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: Plan file missing or invalid required fields: ${missing[*]}" >&2
+        return 1
+    fi
+    
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Error Detection & Classification
 # ═══════════════════════════════════════════════════════════════════════════
 

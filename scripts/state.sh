@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # State management utilities for pi-swarm
 # Simple, durable state tracking using JSON files with atomic writes
+#
+# CONCURRENCY NOTE: These utilities use atomic file writes (temp + mv) which
+# are safe for single-writer scenarios. They are NOT safe for concurrent
+# multi-process updates to the same state file without external locking.
+# If multiple processes need to update the same state file, wrap calls with
+# lock_acquire/lock_release around the state file's lock.
 
 STATE_VERSION="1"
 
@@ -77,7 +83,7 @@ init_state_file() {
   "type": "$type",
   "status": "initialized",
   "current_wave": 0,
-  "waves_completed": [],
+  "completed_waves": [],
   "tasks": {},
   "errors": [],
   "created_at": "$now",
@@ -241,7 +247,7 @@ wave_complete() {
     
     atomic_json_update "$file" \
         --argjson wave "$wave_num" \
-        '.waves_completed += [$wave] | .waves_completed |= unique'
+        '.completed_waves += [$wave] | .completed_waves |= unique'
 }
 
 # Check if wave was completed
@@ -250,7 +256,7 @@ wave_is_complete() {
     local wave_num="$2"
     
     local is_in
-    is_in=$(jq --argjson wave "$wave_num" '.waves_completed | contains([$wave])' "$file" 2>/dev/null)
+    is_in=$(jq --argjson wave "$wave_num" '.completed_waves | contains([$wave])' "$file" 2>/dev/null)
     
     [[ "$is_in" == "true" ]]
 }
