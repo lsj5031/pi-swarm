@@ -174,17 +174,17 @@ ERROR_API=6             # API error (5xx) - retry
 detect_error_type() {
     local content="$1"
     
-    if echo "$content" | grep -qiE "(429|rate.?limit|too many requests|throttl)"; then
+    if echo "$content" | grep -qiE "(status.?429|http.?429|error.?429|rate.?limit|too many requests|throttl)"; then
         echo $ERROR_RATE_LIMIT
-    elif echo "$content" | grep -qiE "(401|403|unauthorized|forbidden|invalid.?api.?key)"; then
+    elif echo "$content" | grep -qiE "(status.?40[13]|http.?40[13]|error.?40[13]|unauthorized|forbidden|invalid.?api.?key)"; then
         echo $ERROR_AUTH
-    elif echo "$content" | grep -qiE "(quota|billing|exceeded|insufficient|payment.?required|402)"; then
+    elif echo "$content" | grep -qiE "(quota.?(exceeded|limit)|billing.?(error|issue|limit)|insufficient.?(credit|balance|fund)|payment.?required|status.?402|http.?402|error.?402|credit.?limit|spending.?limit)"; then
         echo $ERROR_QUOTA
     elif echo "$content" | grep -qiE "(timeout|timed?.?out)"; then
         echo $ERROR_TIMEOUT
     elif echo "$content" | grep -qiE "(network|connection|refused|ECONNREFUSED|ETIMEDOUT)"; then
         echo $ERROR_NETWORK
-    elif echo "$content" | grep -qiE "(500|502|503|504|internal.?server|bad.?gateway)"; then
+    elif echo "$content" | grep -qiE "(status.?50[0-4]|http.?50[0-4]|error.?50[0-4]|internal.?server|bad.?gateway|service.?unavailable)"; then
         echo $ERROR_API
     else
         echo $ERROR_NONE

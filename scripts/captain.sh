@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source shared library
 source "$SCRIPT_DIR/lib.sh"
 STATE_DIR=".captain"
+WORKTREE_DIR=".worktrees"
 MODEL=""
 EPIC_NUM=""
 MAX_RETRIES=2
@@ -238,6 +239,225 @@ Output ONLY valid JSON, no explanation."
     error "Failed to parse epic. Pi output:"
     echo "$pi_output"
     return 1
+}
+
+# Create GitHub issues from task list when epic has no linked issues
+create_issues_from_tasks() {
+    log "Creating GitHub issues from task list..."
+    
+    local tasks created_issues=()
+    tasks=$(jq -r '.suggested_execution_order' "$PLAN_FILE")
+    local task_count
+    task_count=$(echo "$tasks" | jq 'length')
+    
+    if [[ "$task_count" -eq 0 ]]; then
+        error "No tasks found in suggested_execution_order"
+        return 1
+    fi
+    
+    # Get epic title for context
+    local epic_title
+    epic_title=$(jq -r '.title' "$STATE_DIR/epic-$EPIC_NUM-raw.json")
+    
+    # Create issues for each task
+    for ((i=0; i<task_count; i++)); do
+        local task_desc step
+        task_desc=$(echo "$tasks" | jq -r ".[$i].task")
+        step=$((i + 1))
+        
+        local issue_title="[$epic_title] Step $step: $task_desc"
+        local issue_body="Part of Epic #$EPIC_NUM
+
+## Task
+$task_desc
+
+## Context
+This issue was auto-created from the epic's task list.
+
+---
+*Auto-created by Captain*"
+        
+        local issue_num
+        if issue_num=$(gh issue create --title "$issue_title" --body "$issue_body" 2>&1 | grep -oE '[0-9]+$'); then
+            info "Created issue #$issue_num: $task_desc"
+            created_issues+=("$issue_num")
+        else
+            warn "Failed to create issue for: $task_desc"
+        fi
+        sleep 1  # Rate limit
+    done
+    
+    if [[ ${#created_issues[@]} -eq 0 ]]; then
+        error "Failed to create any issues"
+        return 1
+    fi
+    
+    # Update plan file with new waves structure
+    local waves_json="[]"
+    for ((i=0; i<${#created_issues[@]}; i++)); do
+        local issue_num="${created_issues[$i]}"
+        local wave_num=$((i + 1))
+        local task_desc
+        task_desc=$(echo "$tasks" | jq -r ".[$i].task")
+        
+        waves_json=$(echo "$waves_json" | jq --argjson w "$wave_num" --argjson i "$issue_num" --arg d "$task_desc" \
+            '. + [{"wave": $w, "issues": [$i], "description": $d}]')
+    done
+    
+    # Update plan file
+    jq --argjson waves "$waves_json" --argjson count "${#created_issues[@]}" \
+        '.waves = $waves | .total_issues = $count' "$PLAN_FILE" > "$PLAN_FILE.tmp" && mv "$PLAN_FILE.tmp" "$PLAN_FILE"
+    
+    success "Created ${#created_issues[@]} issues from task list"
+    return 0
+}
+
+# Create GitHub issues from subtasks (alternative format from pi agent)
+create_issues_from_subtasks() {
+    log "Creating GitHub issues from subtasks..."
+    
+    local subtasks created_issues=()
+    subtasks=$(jq -r '.provided_content.subtasks' "$PLAN_FILE")
+    local task_count
+    task_count=$(echo "$subtasks" | jq 'length')
+    
+    if [[ "$task_count" -eq 0 ]]; then
+        error "No subtasks found"
+        return 1
+    fi
+    
+    # Get epic title and goal for context
+    local epic_title epic_goal
+    epic_title=$(jq -r '.title' "$STATE_DIR/epic-$EPIC_NUM-raw.json")
+    epic_goal=$(jq -r '.provided_content.goal // "No goal specified"' "$PLAN_FILE")
+    
+    # Create issues for each subtask
+    for ((i=0; i<task_count; i++)); do
+        local task_desc step
+        task_desc=$(echo "$subtasks" | jq -r ".[$i]")
+        step=$((i + 1))
+        
+        local issue_title="[$epic_title] $task_desc"
+        local issue_body="Part of Epic #$EPIC_NUM
+
+## Goal
+$epic_goal
+
+## Task
+$task_desc
+
+## Context
+This issue was auto-created from the epic's subtask list.
+
+---
+*Auto-created by Captain*"
+        
+        local issue_num
+        if issue_num=$(gh issue create --title "$issue_title" --body "$issue_body" 2>&1 | grep -oE '[0-9]+$'); then
+            info "Created issue #$issue_num: $task_desc"
+            created_issues+=("$issue_num")
+        else
+            warn "Failed to create issue for: $task_desc"
+        fi
+        sleep 1  # Rate limit
+    done
+    
+    if [[ ${#created_issues[@]} -eq 0 ]]; then
+        error "Failed to create any issues"
+        return 1
+    fi
+    
+    # Update plan file with new waves structure (sequential for subtasks)
+    local waves_json="[]"
+    for ((i=0; i<${#created_issues[@]}; i++)); do
+        local issue_num="${created_issues[$i]}"
+        local wave_num=$((i + 1))
+        local task_desc
+        task_desc=$(echo "$subtasks" | jq -r ".[$i]")
+        
+        waves_json=$(echo "$waves_json" | jq --argjson w "$wave_num" --argjson i "$issue_num" --arg d "$task_desc" \
+            '. + [{"wave": $w, "issues": [$i], "description": $d}]')
+    done
+    
+    # Update plan file
+    jq --argjson waves "$waves_json" --argjson count "${#created_issues[@]}" \
+        '.waves = $waves | .total_issues = $count' "$PLAN_FILE" > "$PLAN_FILE.tmp" && mv "$PLAN_FILE.tmp" "$PLAN_FILE"
+    
+    success "Created ${#created_issues[@]} issues from subtasks"
+    return 0
+}
+
+# Work on a simple epic directly (no sub-issues, just a description)
+work_on_epic_directly() {
+    log "Working on epic #$EPIC_NUM directly..."
+    
+    local epic_title epic_body
+    epic_title=$(jq -r '.title' "$STATE_DIR/epic-$EPIC_NUM-raw.json")
+    epic_body=$(jq -r '.body' "$STATE_DIR/epic-$EPIC_NUM-raw.json")
+    
+    local worktree_path="$WORKTREE_DIR/epic-$EPIC_NUM"
+    local log_file="$WORKTREE_DIR/epic-$EPIC_NUM.log"
+    local branch_name="epic/$EPIC_NUM"
+    
+    # Clean up existing
+    if [[ -d "$worktree_path" ]]; then
+        git worktree remove -f "$worktree_path" 2>/dev/null || rm -rf "$worktree_path"
+    fi
+    git worktree prune 2>/dev/null || true
+    git branch -D "$branch_name" 2>/dev/null || true
+    
+    # Create worktree from main
+    local main_branch
+    main_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+    git worktree add -b "$branch_name" "$worktree_path" "origin/$main_branch" 2>>"$log_file"
+    
+    local prompt="You are working on GitHub issue #$EPIC_NUM.
+
+# Issue: $epic_title
+
+$epic_body
+
+# Instructions:
+1. Understand the task described above
+2. Implement the required functionality
+3. Write tests if appropriate
+4. Ensure the code compiles and tests pass
+5. Commit your changes with a descriptive message
+
+Work methodically and verify your implementation works."
+
+    log "Running pi agent on epic..."
+    
+    local pi_cmd="pi"
+    [[ -n "$MODEL" ]] && pi_cmd="pi --model $MODEL"
+    
+    if (cd "$worktree_path" && $pi_cmd "$prompt" 2>&1) | tee -a "$log_file"; then
+        success "Agent completed work on epic #$EPIC_NUM"
+        
+        # Check for changes and push
+        if [[ -n $(cd "$worktree_path" && git status --porcelain) ]]; then
+            warn "Uncommitted changes detected, asking agent to commit..."
+            (cd "$worktree_path" && $pi_cmd "Please commit your changes now." 2>&1) | tee -a "$log_file"
+        fi
+        
+        # Push and create PR
+        if (cd "$worktree_path" && git push -u origin "$branch_name" 2>&1); then
+            log "Creating PR..."
+            local pr_url
+            pr_url=$(cd "$worktree_path" && gh pr create --title "$epic_title" --body "Closes #$EPIC_NUM
+
+Automated implementation by Pi Captain." --head "$branch_name" 2>&1) || true
+            
+            if [[ -n "$pr_url" ]]; then
+                success "Created PR: $pr_url"
+            fi
+        fi
+        
+        return 0
+    else
+        error "Agent failed on epic #$EPIC_NUM"
+        return 1
+    fi
 }
 
 # Display execution plan
@@ -632,8 +852,42 @@ main() {
     
     # Validate plan structure before proceeding
     if ! validate_plan "$PLAN_FILE" "waves"; then
-        error "Invalid execution plan. Please check the plan file or re-generate."
-        exit 1
+        # Check if this is a task-list epic (no linked issues)
+        local has_tasks
+        has_tasks=$(jq -r 'if .suggested_execution_order then "order" elif .provided_content.subtasks then "subtasks" else "none" end' "$PLAN_FILE" 2>/dev/null)
+        
+        if [[ "$has_tasks" == "order" ]]; then
+            warn "Epic has task list but no linked GitHub issues."
+            warn "Creating issues from task list..."
+            create_issues_from_tasks || { error "Failed to create issues"; exit 1; }
+        elif [[ "$has_tasks" == "subtasks" ]]; then
+            warn "Epic has subtasks but no linked GitHub issues."
+            warn "Creating issues from subtasks..."
+            create_issues_from_subtasks || { error "Failed to create issues"; exit 1; }
+        else
+            # Check if epic is closed - skip gracefully
+            local epic_state
+            epic_state=$(jq -r '.state' "$STATE_DIR/epic-$EPIC_NUM-raw.json" 2>/dev/null)
+            if [[ "$epic_state" == "CLOSED" ]]; then
+                warn "Epic #$EPIC_NUM is CLOSED with no actionable items. Marking complete."
+                success "Epic #$EPIC_NUM skipped (closed)"
+                exit 0
+            fi
+            
+            # Check if this is a simple epic (just a description, no subtasks)
+            # Treat the epic itself as a single issue to work on
+            local has_description
+            has_description=$(jq -r '.available_info.description // empty' "$PLAN_FILE" 2>/dev/null)
+            if [[ -n "$has_description" ]]; then
+                warn "Epic #$EPIC_NUM is a simple task with no sub-issues."
+                warn "Working on epic directly..."
+                work_on_epic_directly || { error "Failed to work on epic"; exit 1; }
+                exit 0
+            fi
+            
+            error "Invalid execution plan. Please check the plan file or re-generate."
+            exit 1
+        fi
     fi
     
     show_plan

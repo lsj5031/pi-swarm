@@ -214,13 +214,19 @@ Instructions:
     if (cd "$worktree_path" && $timeout_cmd $pi_json_cmd "$prompt" 2>&1) | parse_pi_output "$tag" "$abs_log_file" "$json_log_file"; then
         echo -e "$tag ✅ Agent completed" | tee -a "$log_file"
 
-        # Check for uncommitted changes and ask agent to fix
-        if [[ -n $(cd "$worktree_path" && git status --porcelain) ]]; then
-            echo -e "$tag ⚠️  Uncommitted changes detected. Asking agent to commit..." | tee -a "$log_file"
+        # Check for uncommitted changes and ask agent to fix (with retry)
+        local commit_attempts=0
+        while [[ -n $(cd "$worktree_path" && git status --porcelain) ]] && [[ $commit_attempts -lt 2 ]]; do
+            commit_attempts=$((commit_attempts + 1))
+            echo -e "$tag ⚠️  Uncommitted changes detected (attempt $commit_attempts). Asking agent to commit..." | tee -a "$log_file"
             
-            local followup_prompt="It seems there are uncommitted changes. Please commit your changes now. If there are pre-commit hook errors, please fix them."
+            local followup_prompt="IMPORTANT: You MUST commit your changes NOW. Run:
+1. git add -A
+2. git commit -m 'feat: <description> (closes #$issue_num)'
+
+If there are pre-commit hook errors, fix them and commit again. Do NOT leave uncommitted changes."
             (cd "$worktree_path" && $timeout_cmd $pi_json_cmd "$followup_prompt" 2>&1) | parse_pi_output "$tag" "$abs_log_file" "$json_log_file"
-        fi
+        done
 
         # Push if requested
         if [[ "$PUSH" == true ]]; then

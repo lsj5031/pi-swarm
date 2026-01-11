@@ -140,14 +140,16 @@ process_pr() {
         return 0
     fi
 
-    # Prune stale worktrees
-    git worktree prune 2>/dev/null || true
-
-    # Clean up existing worktree/branch
+    # Clean up existing worktree and branch completely
     if [[ -d "$worktree_path" ]]; then
-        rm -rf "$worktree_path"
+        git worktree remove -f "$worktree_path" 2>/dev/null || rm -rf "$worktree_path"
     fi
-    # We force fetch the branch to ensure we have latest
+    git worktree prune 2>/dev/null || true
+    
+    # Delete local branch if it exists (prevents "refusing to fetch into checked out branch")
+    git branch -D "$branch_name" 2>/dev/null || true
+    
+    # Fetch PR branch
     echo -e "$tag Fetching PR branch from $head_repo_url $head_ref:$branch_name..." | tee -a "$log_file"
     
     if ! git fetch -f "$head_repo_url" "$head_ref:$branch_name" 2>>"$log_file"; then
@@ -202,15 +204,31 @@ Instructions:
         local changes_made=false
         
         if [[ "$PUSH" == true ]]; then
-            # Check if we have permission to push (maintainerCanModify)
-            if [[ "$can_modify" == "false" ]]; then
+            # Determine if this is a same-repo PR or fork PR
+            local current_repo_url
+            current_repo_url=$(gh repo view --json url -q .url)
+            local is_same_repo=false
+            
+            if [[ "$head_repo_url" == "$current_repo_url" ]] || [[ -z "$head_repo_url" ]] || [[ "$head_repo_url" == "null" ]]; then
+                is_same_repo=true
+            fi
+            
+            # For fork PRs, check maintainerCanModify permission
+            if [[ "$is_same_repo" == false ]] && [[ "$can_modify" == "false" ]]; then
                 echo -e "$tag ⚠️  Cannot push: maintainerCanModify is disabled for this fork" | tee -a "$log_file"
                 echo -e "$tag    Review changes are in $worktree_path but cannot be pushed" | tee -a "$log_file"
             else
                 echo -e "$tag Pushing changes..." | tee -a "$log_file"
-                # Push to the head repo and ref
-                # We use the URL and Ref we got from JSON
-                if push_output=$(cd "$worktree_path" && git push "$head_repo_url" "$branch_name:$head_ref" 2>&1); then
+                # For same-repo PRs, push directly to origin
+                # For fork PRs, push to the head repo URL
+                local push_cmd
+                if [[ "$is_same_repo" == true ]]; then
+                    push_cmd="git push origin $branch_name:$head_ref"
+                else
+                    push_cmd="git push $head_repo_url $branch_name:$head_ref"
+                fi
+                
+                if push_output=$(cd "$worktree_path" && $push_cmd 2>&1); then
                     echo "$push_output" | tee -a "$log_file"
                     if [[ "$push_output" == *"Everything up-to-date"* ]]; then
                         changes_made=false
@@ -229,30 +247,35 @@ Instructions:
         
         local summary=""
         if [[ -f "$json_log_file" ]]; then
-            # First try: get last assistant message from agent_end
-            summary=$(grep '"type":"agent_end"' "$json_log_file" | tail -1 | jq -r '
-                .messages 
-                | map(select(.role == "assistant" and (.content | length > 0))) 
-                | last 
-                | .content 
-                | map(select(.type == "text") | .text) 
-                | join("\n")
-            ' 2>/dev/null || echo "")
+            # Try to get last assistant message from message_end events
+            summary=$(grep '"type":"message_end"' "$json_log_file" | grep '"role":"assistant"' | tail -1 | \
+                jq -r '
+                    .message.content 
+                    | map(select(.type == "text") | .text) 
+                    | join("\n")
+                ' 2>/dev/null || echo "")
             
-            # Fallback: if empty (e.g., due to errors), get last message_end with actual content
+            # Fallback: try turn_end
             if [[ -z "$summary" || "$summary" == "null" ]]; then
-                summary=$(grep '"type":"message_end"' "$json_log_file" | grep '"role":"assistant"' | \
-                    jq -r 'select(.message.content[0].text != null and .message.content[0].text != "") | .message.content[0].text' 2>/dev/null | tail -1 || echo "")
+                summary=$(grep '"type":"turn_end"' "$json_log_file" | tail -1 | \
+                    jq -r '
+                        .message.content 
+                        | map(select(.type == "text") | .text) 
+                        | join("\n")
+                    ' 2>/dev/null || echo "")
             fi
             
-            # Final fallback: check for error message
-            if [[ -z "$summary" || "$summary" == "null" ]]; then
-                local error_msg
-                error_msg=$(grep '"type":"agent_end"' "$json_log_file" | tail -1 | jq -r '.messages[-1].errorMessage // empty' 2>/dev/null)
-                if [[ -n "$error_msg" ]]; then
-                    summary="⚠️ Agent encountered an error: Rate limit / API error. Check logs for details."
-                fi
+            # Truncate if too long (GitHub has 65536 char limit)
+            if [[ ${#summary} -gt 60000 ]]; then
+                summary="${summary:0:60000}
+
+... (truncated)"
             fi
+        fi
+        
+        # Default summary if extraction failed
+        if [[ -z "$summary" || "$summary" == "null" ]]; then
+            summary="Review completed. See log for details."
         fi
         
         local comment_body="## Pi Agent Review

@@ -134,27 +134,40 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate input
-if [[ -z "$MILESTONE_NUM" ]] && [[ ${#EPICS[@]} -eq 0 ]] && [[ -z "$PROJECT_SPEC" ]]; then
-    error "Must specify --milestone, --epics, or --project"
-    usage
+# Initialize state directory
+mkdir -p "$STATE_DIR"
+
+# Handle --resume without source: find the most recent state file
+if [[ "$RESUME" == true ]] && [[ -z "$MILESTONE_NUM" ]] && [[ ${#EPICS[@]} -eq 0 ]] && [[ -z "$PROJECT_SPEC" ]]; then
+    # Find most recent state file
+    LATEST_STATE=$(ls -t "$STATE_DIR"/*.json 2>/dev/null | grep -v '\-plan\.json$' | head -1)
+    if [[ -n "$LATEST_STATE" ]]; then
+        STATE_ID=$(basename "$LATEST_STATE" .json)
+        log "Resuming from: $STATE_ID"
+    else
+        error "No previous state found to resume. Specify --milestone, --epics, or --project"
+        exit 1
+    fi
+else
+    # Validate input for non-resume mode
+    if [[ -z "$MILESTONE_NUM" ]] && [[ ${#EPICS[@]} -eq 0 ]] && [[ -z "$PROJECT_SPEC" ]]; then
+        error "Must specify --milestone, --epics, or --project"
+        usage
+    fi
+    
+    # Determine state file name based on input
+    if [[ -n "$MILESTONE_NUM" ]]; then
+        STATE_ID="milestone-$MILESTONE_NUM"
+    elif [[ -n "$PROJECT_SPEC" ]]; then
+        # Hash the project spec for a stable ID
+        STATE_ID="project-$(echo "$PROJECT_SPEC" | md5sum | cut -c1-8)"
+    else
+        STATE_ID="epics-$(echo "${EPICS[*]}" | tr ' ' '-')"
+    fi
 fi
 
 # Check dependencies
 require_deps gh jq pi git || exit 1
-
-# Initialize state directory
-mkdir -p "$STATE_DIR"
-
-# Determine state file name based on input
-if [[ -n "$MILESTONE_NUM" ]]; then
-    STATE_ID="milestone-$MILESTONE_NUM"
-elif [[ -n "$PROJECT_SPEC" ]]; then
-    # Hash the project spec for a stable ID
-    STATE_ID="project-$(echo "$PROJECT_SPEC" | md5sum | cut -c1-8)"
-else
-    STATE_ID="epics-$(echo "${EPICS[*]}" | tr ' ' '-')"
-fi
 
 STATE_FILE="$STATE_DIR/$STATE_ID.json"
 PLAN_FILE="$STATE_DIR/$STATE_ID-plan.json"
@@ -310,6 +323,8 @@ $issues_md
         else
             info "Creating epic: $epic_title"
             local epic_url
+            # Create label if it doesn't exist (ignore errors)
+            gh label create "epic" --description "Epic tracking issue" --color "5319E7" 2>/dev/null || true
             epic_url=$(gh issue create --title "$epic_title" --body "$epic_body" --label "epic" 2>&1) || true
             
             if [[ "$epic_url" =~ /issues/([0-9]+) ]]; then
@@ -341,8 +356,11 @@ Part of Epic #$epic_num
                     
                     sleep 1  # Rate limiting
                 done
+            elif [[ "$epic_url" =~ "already exists" ]]; then
+                warn "Epic already exists: $epic_title"
             else
                 warn "Failed to create epic: $epic_title"
+                warn "Error: $epic_url"
             fi
             
             sleep 2  # Rate limiting between epics
