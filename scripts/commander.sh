@@ -370,12 +370,35 @@ Part of Epic #$epic_num
     # Update EPICS array with created epic numbers
     EPICS=("${created_epics[@]}")
     
-    # Save to plan
+    # Build mapping from internal IDs (1,2,3...) to GitHub issue numbers
+    local id_to_issue=()
+    for ((i=0; i<${#created_epics[@]}; i++)); do
+        id_to_issue[$((i+1))]="${created_epics[$i]}"
+    done
+    
+    # Save to plan and update epic_waves to use real issue numbers
     local tmp
     tmp=$(mktemp)
+    
+    # Create mapping JSON: {"1": 43, "2": 49, ...}
+    local mapping_json="{"
+    for ((i=0; i<${#created_epics[@]}; i++)); do
+        [[ $i -gt 0 ]] && mapping_json+=","
+        mapping_json+="\"$((i+1))\":${created_epics[$i]}"
+    done
+    mapping_json+="}"
+    
+    # Update plan: save created numbers AND remap epic_waves to use real issue numbers
     jq --argjson epics "$(printf '%s\n' "${created_epics[@]}" | jq -R . | jq -s .)" \
-        '.created_epic_numbers = $epics' "$PLAN_FILE" > "$tmp"
+       --argjson mapping "$mapping_json" \
+       '.created_epic_numbers = $epics | 
+        .epic_waves = [.epic_waves[] | 
+            .epics = ((.epic_ids // .epics) | map($mapping[tostring] // .)) |
+            del(.epic_ids)
+        ]' "$PLAN_FILE" > "$tmp"
     mv "$tmp" "$PLAN_FILE"
+    
+    success "Updated plan with GitHub issue numbers"
 }
 
 # Fetch milestone and parse epics
