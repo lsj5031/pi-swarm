@@ -20,6 +20,7 @@ DRY_RUN=false
 RESUME=false
 FORCE=false
 JOBS=0
+MERGE_PRS=true    # Merge PRs after each wave (default: true)
 
 # Colors
 COLOR_CAPTAIN='\033[1;35m'  # Bold magenta for captain
@@ -50,6 +51,7 @@ Options:
   --resume            Resume from saved state
   --force             Force start even if another instance seems running
   --dry-run           Parse and plan only, don't execute
+  --no-merge          Don't merge PRs after each wave (default: merge)
   -j, --jobs <n>      Max parallel jobs per wave (default: unlimited)
   -h, --help          Show this help
 
@@ -92,6 +94,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --no-merge)
+            MERGE_PRS=false
+            shift
+            ;;
+        --merge)
+            MERGE_PRS=true
             shift
             ;;
         -j|--jobs)
@@ -708,6 +718,59 @@ review_wave_prs() {
     echo ""
 }
 
+# Merge PRs from a wave
+merge_wave_prs() {
+    local wave_num="$1"
+    
+    log "🔀 Merging PRs from Wave $wave_num"
+    
+    # Get issues from this wave
+    local issues
+    issues=$(jq -r --argjson wave "$wave_num" '.waves[] | select(.wave == $wave) | .issues[]' "$PLAN_FILE")
+    
+    local merged=0 failed=0
+    for issue in $issues; do
+        local pr_file=".worktrees/issue-$issue.pr"
+        if [[ -f "$pr_file" ]]; then
+            local pr_url pr_num
+            pr_url=$(cat "$pr_file")
+            pr_num=$(echo "$pr_url" | grep -oE '[0-9]+$')
+            
+            if [[ -n "$pr_num" ]]; then
+                # Check if PR is mergeable
+                local mergeable
+                mergeable=$(gh pr view "$pr_num" --json mergeable -q '.mergeable' 2>/dev/null)
+                
+                if [[ "$mergeable" == "MERGEABLE" ]]; then
+                    info "Merging PR #$pr_num for issue #$issue..."
+                    if gh pr merge "$pr_num" --squash --delete-branch 2>/dev/null; then
+                        success "Merged PR #$pr_num"
+                        merged=$((merged + 1))
+                        
+                        # Close the issue
+                        gh issue close "$issue" --comment "Completed via PR #$pr_num" 2>/dev/null || true
+                        
+                        # Update issue status
+                        set_issue_status "$issue" "merged"
+                    else
+                        warn "Failed to merge PR #$pr_num"
+                        failed=$((failed + 1))
+                    fi
+                elif [[ "$mergeable" == "CONFLICTING" ]]; then
+                    warn "PR #$pr_num has conflicts, skipping merge"
+                    failed=$((failed + 1))
+                else
+                    info "PR #$pr_num not ready to merge (status: $mergeable)"
+                fi
+            fi
+        fi
+    done
+    
+    if [[ $merged -gt 0 ]] || [[ $failed -gt 0 ]]; then
+        info "Wave $wave_num merge results: $merged merged, $failed failed"
+    fi
+}
+
 # Check if wave is complete
 is_wave_complete() {
     local wave_num="$1"
@@ -958,6 +1021,11 @@ main() {
         
         # Review PRs from this wave
         review_wave_prs "$wave"
+        
+        # Merge PRs if enabled (default: true)
+        if [[ "$MERGE_PRS" == true ]] && [[ "$DRY_RUN" != true ]]; then
+            merge_wave_prs "$wave"
+        fi
         
         # Mark wave as complete
         local completed_waves
