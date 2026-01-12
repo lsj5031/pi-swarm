@@ -10,17 +10,26 @@ Parallel GitHub issue and PR processing using the `pi` agent and Git worktrees.
 - **Commander**: Orchestrate multiple epics or generate entire projects from a description
 - **Isolated Worktrees**: Each agent works in its own git worktree
 - **Headless Execution**: Uses `pi --mode json` for structured monitoring
-- **State Persistence**: Resume interrupted operations
-- **Auto-retry**: Failed tasks retry automatically
+- **State Persistence**: Resume interrupted operations with `--resume`
+- **Auto-retry**: Failed tasks retry automatically with exponential backoff
+- **Error Detection**: Smart detection of fatal errors (quota, auth, rate limits)
+- **GitHub Issue Management**: Auto-creates issues from task lists in project mode
+- **Lock Files**: Prevents duplicate runs with stale lock detection
+- **Heartbeat Monitoring**: Tracks process liveness for crash recovery
 
 ## Command Hierarchy
 
 ```
-Commander ──► Captain ──► swarm.sh ──► pi agent
-                │              │
-                │              └──► pr-swarm.sh ──► pi agent
-                │
-                └──► Captain ──► ...
+Commander (Project/Milestone orchestrator)
+    │
+    ├─► Captain (Epic orchestrator)
+    │       ├─► swarm.sh (Issue wave 1)
+    │       ├─► pr-swarm.sh (Review PRs)
+    │       ├─► swarm.sh (Issue wave 2)
+    │       └─► ...
+    │
+    └─► Captain (Another Epic)
+            └─► ...
 ```
 
 ## Installation
@@ -106,48 +115,167 @@ Orchestrates multiple epics or projects:
 | `--model <name>` | Model to use (sonnet, opus, etc.) |
 | `-j, --jobs <n>` | Max parallel jobs |
 | `--dry-run` | Preview without executing |
-| `--resume` | Resume from saved state |
+| `--resume` | Resume from saved state after interruption |
+| `--force` | Force start even if lock file exists (overrides stale locks) |
 
 ### Script-Specific
 
 | Script | Key Options |
 |--------|-------------|
-| `swarm.sh` | `--pr/--no-pr`, `--push/--no-push`, `--timeout <min>` |
-| `pr-swarm.sh` | `--push/--no-push`, `--timeout <min>` |
-| `captain.sh` | `--epic <num>`, `--max-retries <n>`, `--wave-timeout <min>` |
-| `commander.sh` | `--milestone <num>`, `--epics <...>`, `--project <spec>`, `--max-parallel <n>` |
+| `swarm.sh` | `--pr/--no-pr`, `--push/--no-push`, `--cleanup/--no-cleanup`, `--timeout <min>` |
+| `pr-swarm.sh` | `--push/--no-push`, `--cleanup/--no-cleanup`, `--timeout <min>` |
+| `captain.sh` | `--epic <num>`, `--max-retries <n>`, `--wave-timeout <min>`, `--resume`, `--force` |
+| `commander.sh` | `--milestone <num>`, `--epics <...>`, `--project <spec>`, `--max-parallel <n>`, `--cleanup`, `--merge-prs` |
 
-## Monitoring
+## Monitoring & Logs
 
 ```bash
 # Watch swarm progress
 tail -f .worktrees/*.log
 
-# Captain state
+# Captain state (includes issue status, retries, errors)
 cat .captain/epic-151.json | jq .
 
 # Commander state
 cat .commander/milestone-200.json | jq .
+
+# View specific issue logs
+cat .worktrees/issue-48.log
+
+# Check for errors in state
+jq '.errors' .captain/epic-151.json
+
+# Monitor heartbeat (process liveness)
+cat .captain/.lock-epic-151
 ```
 
 ## Output Structure
 
 ```
 .worktrees/           # Swarm output
-├── issue-48/         # Git worktree
-├── issue-48.log      # Human log
-├── issue-48.jsonl    # JSON log
-└── issue-48.pr       # PR URL
+├── issue-48/         # Git worktree (isolated environment)
+├── issue-48.log      # Human-readable log
+├── issue-48.jsonl    # JSON log (pi agent output)
+└── issue-48.pr       # PR URL (created after completion)
 
-.captain/             # Captain state
-├── epic-151.json
-├── epic-151-plan.json
-└── epic-151.log
+.captain/             # Captain state & logs
+├── epic-151.json         # State file (issue status, retries, errors)
+├── epic-151-plan.json    # Execution plan (waves, dependencies)
+├── epic-151.log          # Captain log
+└── .lock-epic-151        # Lock file with heartbeat
 
-.commander/           # Commander state
-├── project-abc123.json
-├── project-abc123-plan.json
-└── epic-*.log
+.commander/           # Commander state & logs
+├── project-abc123.json       # State file (epic status)
+├── project-abc123-plan.json  # Execution plan
+├── epic-151.log              # Per-epic captain logs
+└── .lock-project-abc123      # Lock file with heartbeat
+```
+
+## Resume & Recovery
+
+### Resuming Interrupted Operations
+
+All scripts support `--resume` to continue after interruption:
+
+```bash
+# Resume captain execution
+scripts/captain.sh --epic 151 --resume
+
+# Resume commander execution
+scripts/commander.sh --milestone 200 --resume
+
+# Force resume if lock is stale (process crashed)
+scripts/captain.sh --epic 151 --resume --force
+```
+
+### State Persistence
+
+State files track all progress:
+- Issue status: `pending`, `in_progress`, `completed`, `failed`, `fatal`
+- Retry counts per task
+- Error messages and types
+- Wave completion status
+
+### Lock Files & Heartbeats
+
+- Lock files prevent duplicate runs
+- Heartbeats update every 30s to detect stale processes
+- Use `--force` to override stale locks
+
+## Error Handling
+
+### Automatic Error Detection
+
+The system detects and handles these error types:
+
+| Error Type | Detection | Behavior |
+|------------|-----------|----------|
+| **Rate Limit (429)** | "rate limit", "too many requests" | Retry with exponential backoff |
+| **Auth (401/403)** | "unauthorized", "forbidden" | **Fatal** - stop immediately |
+| **Quota Exceeded** | "quota", "billing", "insufficient" | **Fatal** - stop immediately |
+| **Timeout** | Exit code 124 | Retry with backoff |
+| **Network** | "connection", "ECONNREFUSED" | Retry with backoff |
+| **API Error (5xx)** | "500", "502", "503" | Retry with backoff |
+
+### Fatal Errors
+
+When quota/auth errors are detected:
+1. Task marked as `fatal` (won't retry)
+2. Error recorded in state file
+3. Execution stops after current wave
+4. Summary includes error details
+
+### Recovering from Errors
+
+```bash
+# 1. Fix the issue (add credits, update API key, etc.)
+# 2. Resume execution
+scripts/captain.sh --epic 151 --resume
+
+# 3. If lock is stale, force resume
+scripts/captain.sh --epic 151 --resume --force
+```
+
+## GitHub Issue Handling
+
+### Project Mode (`--project`)
+
+When using `commander.sh --project`:
+1. **Pi agent generates** project plan with epics and tasks
+2. **Creates GitHub issues** for epic + all sub-issues
+3. **Links issues** with proper dependencies
+4. **Executes plan** using captain/swarm orchestration
+
+### Epic Issue Formats
+
+Captain supports multiple epic formats:
+
+**Format 1: Linked Issues**
+```markdown
+## Sub-Issues
+- [ ] #145 - Create API endpoints (1 day)
+- [ ] #146 - Build frontend (depends on #145)
+
+## Success Criteria
+- All tests passing
+- Code reviewed
+```
+
+**Format 2: Task List (auto-creates issues)**
+```markdown
+## Tasks
+1. Design database schema
+2. Implement REST API
+3. Build frontend UI
+
+Captain will create GitHub issues for each task.
+```
+
+**Format 3: Simple Description**
+```markdown
+Build a user authentication system with JWT tokens.
+
+Captain will work on this directly as a single task.
 ```
 
 ## Epic/Milestone Format
@@ -183,6 +311,9 @@ scripts/captain.sh --epic 151 --model opus
 # Resume interrupted epic
 scripts/captain.sh --epic 151 --resume
 
+# Force resume if lock is stale
+scripts/captain.sh --epic 151 --resume --force
+
 # Multiple epics with 3 parallel captains
 scripts/commander.sh --epics 151 160 175 --max-parallel 3
 
@@ -191,6 +322,12 @@ scripts/commander.sh --project "REST API with JWT auth" --dry-run
 
 # Execute generated project
 scripts/commander.sh --project "REST API with JWT auth"
+
+# Run cleanup after completion
+scripts/commander.sh --milestone 200 --cleanup
+
+# Merge PRs after completion
+scripts/commander.sh --epics 151 160 --merge-prs
 ```
 
 ## Architecture
@@ -200,7 +337,8 @@ scripts/commander.sh --project "REST API with JWT auth"
 │                      Commander                          │
 │  - Parses milestone/project                             │
 │  - Creates GitHub issues (project mode)                 │
-│  - Orchestrates multiple Captains                       │
+│  - Orchestrates multiple Captains in parallel           │
+│  - Optional cleanup and PR merging                      │
 └────────────────────────┬────────────────────────────────┘
                          │
         ┌────────────────┼────────────────┐
@@ -208,21 +346,26 @@ scripts/commander.sh --project "REST API with JWT auth"
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
 │   Captain    │ │   Captain    │ │   Captain    │
 │   Epic #1    │ │   Epic #2    │ │   Epic #3    │
+│              │ │              │ │              │
+│  - Waves     │ │  - Waves     │ │  - Waves     │
+│  - Retries   │ │  - Retries   │ │  - Retries   │
+│  - State mgmt│ │  - State mgmt│ │  - State mgmt│
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
        │                │                │
        ▼                ▼                ▼
 ┌──────────────────────────────────────────────────────┐
 │                    swarm.sh                          │
-│  - Creates worktrees                                 │
+│  - Creates isolated worktrees                        │
 │  - Spawns parallel pi agents                         │
-│  - Creates PRs                                       │
+│  - Commits and creates PRs                           │
+│  - Error detection and retry                         │
 └──────────────────────────┬───────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────┐
 │                   pr-swarm.sh                        │
-│  - Reviews PRs                                       │
-│  - Fixes issues                                      │
-│  - Posts comments                                    │
+│  - Reviews PRs with pi agent                         │
+│  - Fixes issues directly                             │
+│  - Pushes and posts comments                         │
 └──────────────────────────────────────────────────────┘
 ```

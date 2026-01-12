@@ -259,6 +259,9 @@ scripts/captain.sh --epic 151 --model opus -j 3
 # Resume interrupted epic
 scripts/captain.sh --epic 151 --resume
 
+# Force resume if lock is stale
+scripts/captain.sh --epic 151 --resume --force
+
 # Execute milestone with 3 parallel captains
 scripts/commander.sh --milestone 200 --max-parallel 3
 
@@ -270,4 +273,10 @@ scripts/commander.sh --project "Build REST API for user management with JWT auth
 
 # Dry run project generation (shows plan + creates issues)
 scripts/commander.sh --project "CLI todo app" --dry-run
+
+# Run cleanup after completion
+scripts/commander.sh --milestone 200 --cleanup
+
+# Merge PRs after completion
+scripts/commander.sh --epics 151 160 --merge-prs
 ```
